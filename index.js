@@ -1,7 +1,8 @@
-require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
+
+require('dotenv').config();
 
 const app = express();
 app.use(bodyParser.json());
@@ -9,50 +10,52 @@ app.use(bodyParser.json());
 app.post('/', async (req, res) => {
   try {
     const pubsubMessage = req.body.message;
-    const rawHeaders = req.headers;
 
     if (!pubsubMessage || !pubsubMessage.data) {
       console.log('No data in message');
       return res.status(400).send('Bad Request');
     }
 
-    const base64Data = pubsubMessage.data;
-    const decoded = Buffer.from(base64Data, 'base64').toString();
+    const decoded = Buffer.from(pubsubMessage.data, 'base64').toString();
     const payload = JSON.parse(decoded);
 
-    const {
-      emailAddress,
-      historyId
-    } = payload;
+    console.log('Decoded Gmail payload:', payload);
 
-    const webhookUrl = process.env.FORWARD_WEBHOOK_URL;
-    if (!webhookUrl) {
-      console.error('Missing FORWARD_WEBHOOK_URL');
-      return res.status(500).send('Missing webhook URL');
+    const { emailAddress, historyId, labels = [], inbox = false, unread = false } = payload;
+
+    // Filtering logic
+    const hasLabel = labels.includes('Label_ai-process');
+    if (!(inbox && unread && hasLabel)) {
+      console.log('Filtered out – Conditions not met');
+      return res.status(200).send('Filtered');
     }
 
-    const bodyToSend = {
-      emailAddress,
-      historyId,
-      messageId: pubsubMessage.messageId || pubsubMessage.message_id,
-      publishTime: pubsubMessage.publishTime || pubsubMessage.publish_time,
-      subscription: req.body.subscription || null,
+    // Forward to n8n
+    const forwardUrl = process.env.FORWARD_WEBHOOK_URL;
+    if (!forwardUrl) {
+      console.error('Missing FORWARD_WEBHOOK_URL');
+      return res.status(500).send('Misconfigured');
+    }
+
+    const enrichedPayload = {
+      ...payload,
       raw: {
-        base64Data,
-        headers: rawHeaders
-      }
+        base64Data: pubsubMessage.data,
+        headers: req.headers,
+      },
     };
 
-    await axios.post(webhookUrl, bodyToSend);
-    console.log('Forwarded to n8n:', bodyToSend);
-    res.status(200).send('OK');
+    await axios.post(forwardUrl, enrichedPayload);
+    console.log('Forwarded payload to n8n');
+
+    return res.status(200).send('Forwarded');
   } catch (err) {
     console.error('Error processing Gmail push:', err);
-    res.status(500).send('Internal Server Error');
+    return res.status(500).send('Internal Server Error');
   }
 });
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`Gmail filter proxy listening on port ${PORT}`);
+const port = process.env.PORT || 10000;
+app.listen(port, () => {
+  console.log(`Gmail filter proxy listening on port ${port}`);
 });
