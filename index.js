@@ -6,104 +6,98 @@ const axios = require('axios');
 const app = express();
 app.use(bodyParser.json());
 
-const WEBHOOK_URL = process.env.FORWARD_WEBHOOK_URL;
-const AI_LABEL_ID = 'Label_3240693713151181396'; // ai-process label ID
+// --- Configuration from Environment Variables ---
+const N8N_WEBHOOK_URL = process.env.FORWARD_WEBHOOK_URL;
+const GMAIL_PENDING_LABEL_ID = process.env.AI_LABEL_ID || 'Label_3240693713151181396'; // Fallback to current hardcoded ID
 
+const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID;
+const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
+const GMAIL_REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN;
+
+// --- Gmail Access Token Function ---
 async function getAccessToken() {
-  const response = await axios.post('https://oauth2.googleapis.com/token', {
-    client_id: process.env.GMAIL_CLIENT_ID,
-    client_secret: process.env.GMAIL_CLIENT_SECRET,
-    refresh_token: process.env.GMAIL_REFRESH_TOKEN,
-    grant_type: 'refresh_token'
-  });
-  return response.data.access_token;
+  try {
+    const response = await axios.post('https://oauth2.googleapis.com/token', {
+      client_id: GMAIL_CLIENT_ID,
+      client_secret: GMAIL_CLIENT_SECRET,
+      refresh_token: GMAIL_REFRESH_TOKEN,
+      grant_type: 'refresh_token',
+    });
+    return response.data.access_token;
+  } catch (error) {
+    console.error('Error getting access token:', error.response?.data || error.message);
+    throw new Error('Failed to get Gmail access token');
+  }
 }
 
+// --- Main Webhook Handler ---
 app.post('/', async (req, res) => {
+  console.log('Pub/Sub notification received. Processing...');
+
   try {
-    const pubsubMessage = req.body.message;
-
-    if (!pubsubMessage || !pubsubMessage.data) {
-      return res.status(400).send('Bad Request: Missing message');
-    }
-
-    const decoded = Buffer.from(pubsubMessage.data, 'base64').toString();
-    const payload = JSON.parse(decoded);
-    const { emailAddress, historyId } = payload;
-
-    if (!emailAddress || !historyId) {
-      console.log('Missing emailAddress or historyId');
-      return res.status(400).send('Bad Request: Missing fields');
-    }
-
     const accessToken = await getAccessToken();
-    const adjustedHistoryId = parseInt(historyId) - 3;
 
-    const historyRes = await axios.get('https://gmail.googleapis.com/gmail/v1/users/me/history', {
-      headers: {
-        Authorization: `Bearer ${accessToken}`
-      },
+    console.log(`Querying Gmail for messages with label: ${GMAIL_PENDING_LABEL_ID}`);
+    const listMessagesResponse = await axios.get('https://gmail.googleapis.com/gmail/v1/users/me/messages', {
+      headers: { Authorization: `Bearer ${accessToken}` },
       params: {
-        startHistoryId: adjustedHistoryId,
-        historyTypes: ['messageAdded','labelAdded']
-      }
+        q: `label:${GMAIL_PENDING_LABEL_ID}`,
+        maxResults: 25,
+      },
     });
 
-    console.log('📜 Raw Gmail history response:', JSON.stringify(historyRes.data, null, 2));
+    const messages = listMessagesResponse.data.messages || [];
 
-    const history = historyRes.data.history || [];
-    const messageIds = [...new Set(history.flatMap(h => h.messages?.map(m => m.id) || []))];
+    if (messages.length === 0) {
+      console.log(`No messages found with label ${GMAIL_PENDING_LABEL_ID}. Likely a 'label removed' event. Nothing to forward.`);
+      return res.status(200).send('OK - No pending messages found.');
+    }
 
-    for (const id of messageIds) {
-      const msgRes = await axios.get(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}`, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`
-        },
-        params: {
-          format: 'metadata'
-        }
-      });
+    console.log(`Found ${messages.length} message(s) with label ${GMAIL_PENDING_LABEL_ID}. Preparing to forward to n8n...`);
 
-      const labelIds = msgRes.data.labelIds || [];
+    let successfulForwards = 0;
+    let failedForwards = 0;
 
-      const hasInbox = labelIds.includes('INBOX');
-      const isUnread = labelIds.includes('UNREAD');
-      const hasAiProcess = labelIds.includes(AI_LABEL_ID);
-
-      console.log(`🔍 Message ${id} – inbox: ${hasInbox}, unread: ${isUnread}, ai-process: ${hasAiProcess}`);
-
-      if (hasInbox && isUnread && hasAiProcess) {
-        const enrichedPayload = {
-          emailAddress,
-          historyId,
-          messageId: pubsubMessage.messageId || pubsubMessage.message_id,
-          publishTime: pubsubMessage.publishTime || pubsubMessage.publish_time,
-          subscription: req.body.subscription || null,
-          raw: {
-            base64Data: pubsubMessage.data,
-            headers: req.headers
-          }
+    for (const message of messages) {
+      const messageId = message.id;
+      try {
+        const payloadToN8n = {
+          messageId: messageId,
+          gmailLabelId: GMAIL_PENDING_LABEL_ID,
+          source: 'render-gmail-filter-proxy',
         };
 
-        await axios.post(WEBHOOK_URL, enrichedPayload, {
-          headers: { 'Content-Type': 'application/json' }
+        console.log(`Forwarding messageId ${messageId} to n8n: ${N8N_WEBHOOK_URL}`);
+        await axios.post(N8N_WEBHOOK_URL, payloadToN8n, {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 15000,
         });
-
-        console.log('✅ Forwarded matching message to n8n:', id);
-        break;
-      } else {
-        console.log(`⏭️ Skipped message ${id} – inbox: ${hasInbox}, unread: ${isUnread}, ai-process: ${hasAiProcess}`);
+        console.log(`Successfully forwarded messageId ${messageId} to n8n.`);
+        successfulForwards++;
+      } catch (n8nError) {
+        console.error(`Error forwarding messageId ${messageId} to n8n:`, n8nError.response?.data || n8nError.message);
+        failedForwards++;
       }
     }
 
-    res.status(200).send('OK');
-  } catch (err) {
-    console.error('❌ Error processing Gmail push:', err.response?.data || err.message);
-    res.status(500).send('Internal Server Error');
+    console.log(`Processing complete. Successful n8n forwards: ${successfulForwards}, Failed n8n forwards: ${failedForwards}.`);
+
+    if (failedForwards > 0 && successfulForwards === 0 && messages.length > 0) {
+      console.warn('All n8n forwards failed. Suggesting Pub/Sub retry.');
+      return res.status(503).send('Service Unavailable - All n8n forwards failed.');
+    }
+
+    res.status(200).send('OK - Processing complete.');
+
+  } catch (error) {
+    console.error('Critical error in main processing logic:', error.response?.data || error.message);
+    res.status(500).send('Internal Server Error - Failed to process Gmail notification.');
   }
 });
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`🚀 Gmail filter proxy running on port ${PORT}`);
+  console.log(`Gmail filter proxy (Node.js/Express) running on port ${PORT}`);
+  console.log(`Watching for Gmail label ID: ${GMAIL_PENDING_LABEL_ID}`);
+  console.log(`Forwarding new messages to n8n: ${N8N_WEBHOOK_URL}`);
 });
