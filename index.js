@@ -9,7 +9,6 @@ app.use(bodyParser.json());
 const WEBHOOK_URL = process.env.FORWARD_WEBHOOK_URL;
 const AI_LABEL_ID = 'Label_3240693713151181396'; // ai-process label ID
 
-// Exchange refresh token for access token
 async function getAccessToken() {
   const response = await axios.post('https://oauth2.googleapis.com/token', {
     client_id: process.env.GMAIL_CLIENT_ID,
@@ -25,23 +24,22 @@ app.post('/', async (req, res) => {
     const pubsubMessage = req.body.message;
 
     if (!pubsubMessage || !pubsubMessage.data) {
-      console.log('Missing message data in request');
-      return res.status(200).send('No data');
+      return res.status(400).send('Bad Request: Missing message');
     }
 
     const decoded = Buffer.from(pubsubMessage.data, 'base64').toString();
     const payload = JSON.parse(decoded);
-    console.log('Decoded Gmail payload:', payload);
-
     const { emailAddress, historyId } = payload;
 
     if (!emailAddress || !historyId) {
       console.log('Missing emailAddress or historyId');
-      return res.status(200).send('Missing required fields');
+      return res.status(400).send('Bad Request: Missing fields');
     }
 
     const accessToken = await getAccessToken();
-    const adjustedHistoryId = parseInt(historyId) - 1;
+    const adjustedHistoryId = parseInt(historyId) - 2;
+
+    console.log(`Decoded Gmail payload:`, { emailAddress, historyId });
 
     const historyRes = await axios.get('https://gmail.googleapis.com/gmail/v1/users/me/history', {
       headers: {
@@ -69,12 +67,11 @@ app.post('/', async (req, res) => {
       });
 
       const labelIds = msgRes.data.labelIds || [];
-
       const hasInbox = labelIds.includes('INBOX');
       const isUnread = labelIds.includes('UNREAD');
       const hasAiProcess = labelIds.includes(AI_LABEL_ID);
 
-      console.log(`Message ${id} – inbox=${hasInbox}, unread=${isUnread}, ai-process=${hasAiProcess}`);
+      console.log(`Message ${id} – inbox: ${hasInbox}, unread: ${isUnread}, ai-process: ${hasAiProcess}`);
 
       if (hasInbox && isUnread && hasAiProcess) {
         const enrichedPayload = {
@@ -95,15 +92,13 @@ app.post('/', async (req, res) => {
 
         console.log('Forwarded matching message to n8n:', id);
         break;
-      } else {
-        console.log(`Skipped message ${id} – did not match all filter criteria`);
       }
     }
 
-    res.status(200).send('Processed');
+    res.status(200).send('OK');
   } catch (err) {
     console.error('Error processing Gmail push:', err.response?.data || err.message);
-    res.status(200).send('Handled with error'); // Prevents Gmail retry loop
+    res.status(500).send('Internal Server Error');
   }
 });
 
