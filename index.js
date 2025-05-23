@@ -8,16 +8,22 @@ app.use(bodyParser.json());
 
 app.post('/', async (req, res) => {
   try {
-    const message = req.body.message;
-    if (!message || !message.data) {
-      console.error('No message data received');
+    const pubsubMessage = req.body.message;
+    const rawHeaders = req.headers;
+
+    if (!pubsubMessage || !pubsubMessage.data) {
+      console.log('No data in message');
       return res.status(400).send('Bad Request');
     }
 
-    const decoded = Buffer.from(message.data, 'base64').toString();
+    const base64Data = pubsubMessage.data;
+    const decoded = Buffer.from(base64Data, 'base64').toString();
     const payload = JSON.parse(decoded);
 
-    console.log('Decoded Gmail payload:', payload);
+    const {
+      emailAddress,
+      historyId
+    } = payload;
 
     const webhookUrl = process.env.FORWARD_WEBHOOK_URL;
     if (!webhookUrl) {
@@ -25,10 +31,23 @@ app.post('/', async (req, res) => {
       return res.status(500).send('Missing webhook URL');
     }
 
-    await axios.post(webhookUrl, payload);
+    const bodyToSend = {
+      emailAddress,
+      historyId,
+      messageId: pubsubMessage.messageId || pubsubMessage.message_id,
+      publishTime: pubsubMessage.publishTime || pubsubMessage.publish_time,
+      subscription: req.body.subscription || null,
+      raw: {
+        base64Data,
+        headers: rawHeaders
+      }
+    };
+
+    await axios.post(webhookUrl, bodyToSend);
+    console.log('Forwarded to n8n:', bodyToSend);
     res.status(200).send('OK');
   } catch (err) {
-    console.error('Error handling Gmail push:', err);
+    console.error('Error processing Gmail push:', err);
     res.status(500).send('Internal Server Error');
   }
 });
