@@ -7,7 +7,7 @@ const app = express();
 app.use(bodyParser.json());
 
 const WEBHOOK_URL = process.env.FORWARD_WEBHOOK_URL;
-const AI_LABEL_ID = 'Label_3240693713151181396'; // <-- your static Gmail label ID
+const AI_LABEL_ID = 'Label_3240693713151181396'; // Static Gmail label ID for ai-process
 
 if (!WEBHOOK_URL) {
   console.error('Missing FORWARD_WEBHOOK_URL');
@@ -25,9 +25,8 @@ app.post('/', async (req, res) => {
     const decoded = Buffer.from(pubsubMessage.data, 'base64').toString();
     const payload = JSON.parse(decoded);
 
-    console.log('📩 Decoded Gmail payload:', payload);
+    console.log('Decoded Gmail payload:', payload);
 
-    // Expecting labels to be present as an array of objects
     const labels = payload.labels || [];
 
     const hasInbox = labels.some(l => l.id === 'INBOX');
@@ -35,7 +34,7 @@ app.post('/', async (req, res) => {
     const hasAiProcess = labels.some(l => l.id === AI_LABEL_ID);
 
     if (!(hasInbox && isUnread && hasAiProcess)) {
-      console.log('⏭️ Filtered out – Conditions not met');
+      console.log('Filtered out – Conditions not met');
       return res.status(200).send('Filtered');
     }
 
@@ -54,15 +53,15 @@ app.post('/', async (req, res) => {
       headers: { 'Content-Type': 'application/json' }
     });
 
-    console.log('✅ Forwarded filtered payload to n8n');
+    console.log('Forwarded filtered payload to n8n');
     res.status(200).send('Forwarded');
   } catch (err) {
-    console.error('❌ Error:', err.response?.data || err.message);
+    console.error('Error:', err.response?.data || err.message);
     res.status(500).send('Internal Server Error');
   }
 });
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`🚀 Gmail proxy listening on port ${PORT}`);
+  console.log(`Gmail proxy listening on port ${PORT}`);
 });
