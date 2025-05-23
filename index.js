@@ -7,6 +7,7 @@ const app = express();
 app.use(bodyParser.json());
 
 const WEBHOOK_URL = process.env.FORWARD_WEBHOOK_URL;
+const AI_LABEL_ID = 'Label_3240693713151181396'; // <-- your static Gmail label ID
 
 if (!WEBHOOK_URL) {
   console.error('Missing FORWARD_WEBHOOK_URL');
@@ -18,31 +19,50 @@ app.post('/', async (req, res) => {
     const pubsubMessage = req.body.message;
 
     if (!pubsubMessage || !pubsubMessage.data) {
-      console.log('No data in message');
-      return res.status(400).send('Bad Request');
+      return res.status(400).send('Bad Request: Missing message');
     }
 
     const decoded = Buffer.from(pubsubMessage.data, 'base64').toString();
     const payload = JSON.parse(decoded);
 
-    console.log('Decoded Gmail payload:', payload);
+    console.log('📩 Decoded Gmail payload:', payload);
 
-    // Filter for presence of emailAddress and historyId only
-    if (payload.emailAddress && payload.historyId) {
-      await axios.post(WEBHOOK_URL, payload);
-      console.log('Forwarded to webhook');
-    } else {
-      console.log('Filtered out – Conditions not met');
+    // Expecting labels to be present as an array of objects
+    const labels = payload.labels || [];
+
+    const hasInbox = labels.some(l => l.id === 'INBOX');
+    const isUnread = labels.some(l => l.id === 'UNREAD');
+    const hasAiProcess = labels.some(l => l.id === AI_LABEL_ID);
+
+    if (!(hasInbox && isUnread && hasAiProcess)) {
+      console.log('⏭️ Filtered out – Conditions not met');
+      return res.status(200).send('Filtered');
     }
 
-    return res.status(200).send('Processed');
+    const enrichedPayload = {
+      ...payload,
+      messageId: pubsubMessage.messageId || pubsubMessage.message_id,
+      publishTime: pubsubMessage.publishTime || pubsubMessage.publish_time,
+      subscription: req.body.subscription || null,
+      raw: {
+        base64Data: pubsubMessage.data,
+        headers: req.headers,
+      }
+    };
+
+    await axios.post(WEBHOOK_URL, enrichedPayload, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    console.log('✅ Forwarded filtered payload to n8n');
+    res.status(200).send('Forwarded');
   } catch (err) {
-    console.error('Error processing Gmail push:', err);
-    return res.status(500).send('Internal Server Error');
+    console.error('❌ Error:', err.response?.data || err.message);
+    res.status(500).send('Internal Server Error');
   }
 });
 
-const port = process.env.PORT || 8080;
-app.listen(port, () => {
-  console.log(`Gmail filter proxy listening on port ${port}`);
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`🚀 Gmail proxy listening on port ${PORT}`);
 });
