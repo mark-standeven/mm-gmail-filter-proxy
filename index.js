@@ -19,9 +19,9 @@ app.post('/', async (req, res) => {
 
     console.log('Decoded Gmail payload:', payload);
 
-    const webhookUrl = process.env.N8N_WEBHOOK_URL;
+    const webhookUrl = process.env.FORWARD_WEBHOOK_URL;
     if (!webhookUrl) {
-      console.error('Missing N8N_WEBHOOK_URL');
+      console.error('Missing FORWARD_WEBHOOK_URL');
       return res.status(500).send('Missing webhook URL');
     }
 
