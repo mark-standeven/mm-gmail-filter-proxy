@@ -37,9 +37,7 @@ app.post('/', async (req, res) => {
     }
 
     const accessToken = await getAccessToken();
-    const adjustedHistoryId = parseInt(historyId) - 2;
-
-    console.log(`Decoded Gmail payload:`, { emailAddress, historyId });
+    const adjustedHistoryId = parseInt(historyId) - 3;
 
     const historyRes = await axios.get('https://gmail.googleapis.com/gmail/v1/users/me/history', {
       headers: {
@@ -47,14 +45,14 @@ app.post('/', async (req, res) => {
       },
       params: {
         startHistoryId: adjustedHistoryId,
-        historyTypes: 'messageAdded'
+        historyTypes: 'messageAdded,labelAdded'
       }
     });
 
+    console.log('📜 Raw Gmail history response:', JSON.stringify(historyRes.data, null, 2));
+
     const history = historyRes.data.history || [];
     const messageIds = [...new Set(history.flatMap(h => h.messages?.map(m => m.id) || []))];
-
-    console.log(`History ${historyId}: Found ${messageIds.length} message(s)`);
 
     for (const id of messageIds) {
       const msgRes = await axios.get(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}`, {
@@ -67,11 +65,12 @@ app.post('/', async (req, res) => {
       });
 
       const labelIds = msgRes.data.labelIds || [];
+
       const hasInbox = labelIds.includes('INBOX');
       const isUnread = labelIds.includes('UNREAD');
       const hasAiProcess = labelIds.includes(AI_LABEL_ID);
 
-      console.log(`Message ${id} – inbox: ${hasInbox}, unread: ${isUnread}, ai-process: ${hasAiProcess}`);
+      console.log(`🔍 Message ${id} – inbox: ${hasInbox}, unread: ${isUnread}, ai-process: ${hasAiProcess}`);
 
       if (hasInbox && isUnread && hasAiProcess) {
         const enrichedPayload = {
@@ -90,19 +89,21 @@ app.post('/', async (req, res) => {
           headers: { 'Content-Type': 'application/json' }
         });
 
-        console.log('Forwarded matching message to n8n:', id);
+        console.log('✅ Forwarded matching message to n8n:', id);
         break;
+      } else {
+        console.log(`⏭️ Skipped message ${id} – inbox: ${hasInbox}, unread: ${isUnread}, ai-process: ${hasAiProcess}`);
       }
     }
 
     res.status(200).send('OK');
   } catch (err) {
-    console.error('Error processing Gmail push:', err.response?.data || err.message);
+    console.error('❌ Error processing Gmail push:', err.response?.data || err.message);
     res.status(500).send('Internal Server Error');
   }
 });
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`Gmail filter proxy running on port ${PORT}`);
+  console.log(`🚀 Gmail filter proxy running on port ${PORT}`);
 });
