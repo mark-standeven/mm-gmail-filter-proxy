@@ -25,7 +25,7 @@ app.post('/', async (req, res) => {
     const decoded = Buffer.from(pubsubMessage.data, 'base64').toString();
     const payload = JSON.parse(decoded);
 
-    console.log('Decoded Gmail payload:', payload);
+    console.dir(payload, { depth: null });
 
     const labels = payload.labels || [];
 
