@@ -45,7 +45,7 @@ app.post('/', async (req, res) => {
       },
       params: {
         startHistoryId: adjustedHistoryId,
-        historyTypes: ['messageAdded,labelAdded']
+        historyTypes: ['messageAdded','labelAdded']
       }
     });
 
