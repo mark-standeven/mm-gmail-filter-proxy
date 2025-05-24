@@ -8,7 +8,7 @@ app.use(bodyParser.json());
 
 // --- Configuration from Environment Variables ---
 const N8N_WEBHOOK_URL = process.env.FORWARD_WEBHOOK_URL;
-const GMAIL_PENDING_LABEL_ID = process.env.AI_LABEL_ID || 'Label_3240693713151181396'; // Fallback for your existing AI_LABEL_ID
+const GMAIL_PENDING_LABEL_ID = process.env.AI_LABEL_ID || 'Label_680711244473690816'; // Fallback for your existing AI_LABEL_ID
 
 const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID;
 const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
