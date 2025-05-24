@@ -8,7 +8,7 @@ app.use(bodyParser.json());
 
 // --- Configuration from Environment Variables ---
 const N8N_WEBHOOK_URL = process.env.FORWARD_WEBHOOK_URL;
-const GMAIL_PENDING_LABEL_ID = process.env.AI_LABEL_ID || 'Label_3240693713151181396'; // Fallback to current hardcoded ID
+const GMAIL_PENDING_LABEL_ID = process.env.AI_LABEL_ID || 'Label_3240693713151181396'; // Fallback for your existing AI_LABEL_ID
 
 const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID;
 const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
@@ -34,6 +34,17 @@ async function getAccessToken() {
 app.post('/', async (req, res) => {
   console.log('Pub/Sub notification received. Processing...');
 
+  // Log the decoded Pub/Sub message for debugging
+  if (req.body.message && req.body.message.data) {
+    try {
+      const decoded = Buffer.from(req.body.message.data, 'base64').toString();
+      console.log('Decoded Pub/Sub payload:', JSON.parse(decoded));
+    } catch (e) {
+      console.error('Error decoding Pub/Sub payload:', e);
+      // Non-fatal for now, but good to know if decoding fails
+    }
+  }
+
   try {
     const accessToken = await getAccessToken();
 
@@ -42,7 +53,7 @@ app.post('/', async (req, res) => {
       headers: { Authorization: `Bearer ${accessToken}` },
       params: {
         q: `label:${GMAIL_PENDING_LABEL_ID}`,
-        maxResults: 25,
+        maxResults: 25, // Process up to 25 messages per trigger.
       },
     });
 
@@ -63,34 +74,41 @@ app.post('/', async (req, res) => {
       try {
         const payloadToN8n = {
           messageId: messageId,
-          gmailLabelId: GMAIL_PENDING_LABEL_ID,
-          source: 'render-gmail-filter-proxy',
+          gmailLabelId: GMAIL_PENDING_LABEL_ID, // So n8n knows which label to remove
+          source: 'render-gmail-filter-proxy', // Identify the source
         };
 
         console.log(`Forwarding messageId ${messageId} to n8n: ${N8N_WEBHOOK_URL}`);
         await axios.post(N8N_WEBHOOK_URL, payloadToN8n, {
           headers: { 'Content-Type': 'application/json' },
-          timeout: 15000,
+          timeout: 15000, // 15 second timeout for n8n call
         });
         console.log(`Successfully forwarded messageId ${messageId} to n8n.`);
         successfulForwards++;
       } catch (n8nError) {
         console.error(`Error forwarding messageId ${messageId} to n8n:`, n8nError.response?.data || n8nError.message);
         failedForwards++;
+        // If forwarding to n8n fails, the label remains on the Gmail message.
+        // It will likely be picked up again on the next trigger of this Render service.
       }
     }
 
     console.log(`Processing complete. Successful n8n forwards: ${successfulForwards}, Failed n8n forwards: ${failedForwards}.`);
 
+    // If all attempts to forward messages failed, and there were messages to process,
+    // it might indicate an issue with n8n. Return 503 to encourage Pub/Sub to retry.
     if (failedForwards > 0 && successfulForwards === 0 && messages.length > 0) {
       console.warn('All n8n forwards failed. Suggesting Pub/Sub retry.');
       return res.status(503).send('Service Unavailable - All n8n forwards failed.');
     }
 
+    // Otherwise, acknowledge successful processing to Pub/Sub.
     res.status(200).send('OK - Processing complete.');
 
   } catch (error) {
+    // This catches errors from getAccessToken() or the initial messages.list call
     console.error('Critical error in main processing logic:', error.response?.data || error.message);
+    // Return 500 to Pub/Sub so it retries delivering this notification later.
     res.status(500).send('Internal Server Error - Failed to process Gmail notification.');
   }
 });
