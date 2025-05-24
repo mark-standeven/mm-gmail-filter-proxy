@@ -15,11 +15,11 @@ const GMAIL_REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN;
 // --- State Management (In-Memory) ---
 let lastProcessedHistoryId = null;
 let isInitialising = true;
-let initInProgress = false; // Lock for the initialization phase specifically
+let initInProgress = false;
 
 // --- Queueing and Locking Mechanism State ---
-let isProcessingQueue = false; // Main lock for processing the queue
-const notificationQueue = []; // Queue to hold incoming notifications
+let isProcessingQueue = false;
+const notificationQueue = [];
 
 // --- Gmail Access Token Function ---
 async function getAccessToken() {
@@ -33,7 +33,7 @@ async function getAccessToken() {
     return response.data.access_token;
   } catch (error) {
     console.error('Error getting access token:', error.response?.data || error.message);
-    throw new Error('Failed to get Gmail access token'); // So the caller can handle it
+    throw new Error('Failed to get Gmail access token');
   }
 }
 
@@ -42,7 +42,7 @@ app.post('/', async (req, res) => {
   const entryTimestamp = new Date().toISOString();
   console.log(`Webhook received at ${entryTimestamp}. Adding to queue.`);
 
-  const pubsubMessage = req.body.message;
+  const pubsubMessage = req.body.message; // Keep the original pubsubMessage object
   if (!pubsubMessage || !pubsubMessage.data) {
     console.warn('Warning: Pub/Sub message format invalid or no data received.');
     return res.status(400).send('Bad Request: Invalid Pub/Sub message.');
@@ -58,24 +58,15 @@ app.post('/', async (req, res) => {
       return res.status(400).send('Bad Request: Missing historyId.');
     }
     
-    // Add to queue. We pass the `res` object so the processing function can respond.
-    notificationQueue.push({ res, currentNotificationPayload, currentNotificationHistoryId });
+    // Add to queue. Pass original pubsubMessage too.
+    notificationQueue.push({ res, pubsubMessage, currentNotificationPayload, currentNotificationHistoryId });
     console.log(`Notification (historyId: ${currentNotificationHistoryId}) added to queue. Queue size: ${notificationQueue.length}`);
-
-    // Acknowledge receipt to Pub/Sub quickly if we're not immediately processing.
-    // The actual success/failure response for the processing will be sent later by processItemFromQueue.
-    // However, Pub/Sub expects a timely response. If processItemFromQueue sends the response, 
-    // this immediate `res.status(202).send()` might not be needed or could conflict.
-    // For simplicity now, let processItemFromQueue handle the response. If timeouts occur,
-    // we can send an immediate 202 here and process truly async.
 
   } catch (e) {
     console.error('Error decoding/queuing Pub/Sub payload:', e);
     return res.status(400).send('Bad Request: Could not decode/queue Pub/Sub data.');
   }
 
-  // Try to process the queue. Don't await it here, as app.post should return quickly.
-  // The actual response to Pub/Sub will be sent by processItemFromQueue.
   processItemFromQueue(); 
 });
 
@@ -90,35 +81,30 @@ async function processItemFromQueue() {
     return;
   }
 
-  isProcessingQueue = true; // Acquire lock
-  const { res, currentNotificationPayload, currentNotificationHistoryId } = notificationQueue.shift(); // Get the oldest item
+  isProcessingQueue = true;
+  // Destructure original pubsubMessage from the queued item
+  const { res, pubsubMessage, currentNotificationPayload, currentNotificationHistoryId } = notificationQueue.shift(); 
   
   console.log(`Queue Worker: Dequeued notification (historyId: ${currentNotificationHistoryId}). Processing... Queue size: ${notificationQueue.length}`);
 
   try {
     const accessToken = await getAccessToken();
 
-    // Initialization Logic
     if (isInitialising || !lastProcessedHistoryId) {
       if (initInProgress) {
-        console.log('Queue Worker: Initialization already in progress by another call. Re-queuing this item for safety.');
-        // Re-add to front of queue if needed, or just let Pub/Sub retry this particular message later if it times out.
-        // For now, we'll just respond to this specific Pub/Sub message and let the init complete.
-        // The lock `isProcessingQueue` should prevent this re-entrancy on init if structured correctly.
-        // Let's assume `initInProgress` helps manage the actual API call for init.
         if (!res.headersSent) res.status(202).send('Accepted: Initialization in progress elsewhere.');
-        isProcessingQueue = false; // Release lock before returning
-        process.nextTick(processItemFromQueue); // Check queue again
+        isProcessingQueue = false; 
+        process.nextTick(processItemFromQueue); 
         return;
       }
       initInProgress = true;
-      console.log('Queue Worker: Performing first-run initialization to get current mailbox historyId...');
+      console.log('Queue Worker: Performing first-run initialization...');
       try {
         const profileResponse = await axios.get('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         lastProcessedHistoryId = profileResponse.data.historyId;
-        isInitialising = false; // Mark as initialized
+        isInitialising = false;
         console.log(`Queue Worker: Initialization complete. Baseline historyId: ${lastProcessedHistoryId}.`);
         if (!res.headersSent) res.status(200).send('OK - Initialized.');
       } catch (initError) {
@@ -127,7 +113,7 @@ async function processItemFromQueue() {
       } finally {
         initInProgress = false;
       }
-    } else { // Normal Processing Logic
+    } else { 
       console.log(`Queue Worker: Current notification historyId: ${currentNotificationHistoryId}, Last processed: ${lastProcessedHistoryId}`);
       if (parseInt(currentNotificationHistoryId) <= parseInt(lastProcessedHistoryId)) {
         console.log('Queue Worker: Notification historyId is not newer. Skipping.');
@@ -148,32 +134,42 @@ async function processItemFromQueue() {
           for (const record of historyRecords) {
             if (record.messagesAdded) {
               for (const messageAddedEntry of record.messagesAdded) {
-                const messageId = messageAddedEntry.message.id;
-                if (!messageId || processedMessageIdsInBatch.has(messageId)) continue;
+                const gmailMsgId = messageAddedEntry.message.id; // Gmail's message ID
+                if (!gmailMsgId || processedMessageIdsInBatch.has(gmailMsgId)) continue;
 
-                console.log(`Queue Worker: Found messageAdded event for messageId: ${messageId}. Verifying...`);
+                console.log(`Queue Worker: Found messageAdded event for gmailMessageId: ${gmailMsgId}. Verifying...`);
                 try {
-                  const msgDetailsResponse = await axios.get(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}`, {
+                  const msgDetailsResponse = await axios.get(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${gmailMsgId}`, {
                     headers: { Authorization: `Bearer ${accessToken}` },
                     params: { format: 'minimal' },
                   });
                   const messageLabelIds = msgDetailsResponse.data.labelIds || [];
                   if (messageLabelIds.includes('INBOX')) {
-                    console.log(`Queue Worker: Message ${messageId} is in INBOX. Forwarding to n8n.`);
-                    const payloadToN8n = { messageId: messageId, source: 'render-gmail-history-filter' };
+                    console.log(`Queue Worker: Message ${gmailMsgId} is in INBOX. Forwarding to n8n.`);
+                    const payloadToN8n = {
+                      gmailMessageId: gmailMsgId, // The ID of the actual Gmail message
+                      source: 'render-gmail-history-filter',
+                      triggeringPubSubHistoryId: currentNotificationHistoryId,
+                      pubSubMessageDetails: { // Original Pub/Sub message details
+                        messageId: pubsubMessage.messageId || null, // Pub/Sub system message ID
+                        publishTime: pubsubMessage.publishTime || null,
+                        // You could also include the original base64 data if needed for deep debugging
+                        // data: pubsubMessage.data 
+                      }
+                    };
                     await axios.post(N8N_WEBHOOK_URL, payloadToN8n, {
                       headers: { 'Content-Type': 'application/json' },
                       timeout: 15000,
                     });
-                    console.log(`Queue Worker: Successfully forwarded messageId ${messageId} to n8n.`);
+                    console.log(`Queue Worker: Successfully forwarded gmailMessageId ${gmailMsgId} to n8n.`);
                     newMessagesForwardedThisRun++;
                   } else {
-                    console.log(`Queue Worker: Message ${messageId} added but not in INBOX. Skipping.`);
+                    console.log(`Queue Worker: Message ${gmailMsgId} added but not in INBOX. Skipping.`);
                   }
                 } catch (msgError) {
-                  console.error(`Queue Worker: Error fetching/forwarding messageId ${messageId}:`, msgError.response?.data || msgError.message);
+                  console.error(`Queue Worker: Error fetching/forwarding gmailMessageId ${gmailMsgId}:`, msgError.response?.data || msgError.message);
                 }
-                processedMessageIdsInBatch.add(messageId);
+                processedMessageIdsInBatch.add(gmailMsgId);
               }
             }
           }
@@ -183,20 +179,19 @@ async function processItemFromQueue() {
           console.log(`Queue Worker: Forwarded ${newMessagesForwardedThisRun} new INBOX messages.`);
         } else { console.log('Queue Worker: No new INBOX messages met criteria in this batch.'); }
         
-        lastProcessedHistoryId = currentNotificationHistoryId; // Update state
+        lastProcessedHistoryId = currentNotificationHistoryId;
         console.log(`Queue Worker: Updated lastProcessedHistoryId to: ${lastProcessedHistoryId}`);
         if (!res.headersSent) res.status(200).send('OK - Processing complete.');
       }
     }
-  } catch (error) { // Catches errors from getAccessToken or other unhandled issues within the try block
+  } catch (error) {
     console.error(`Queue Worker: Critical error processing historyId ${currentNotificationHistoryId}:`, error.response?.data || error.message);
     if (!res.headersSent) {
         res.status(500).send(`Internal Server Error - Failed processing historyId ${currentNotificationHistoryId}.`);
     }
   } finally {
-    isProcessingQueue = false; // Release lock
+    isProcessingQueue = false;
     console.log(`Queue Worker: Processing finished for historyId ${currentNotificationHistoryId}. Lock released.`);
-    // Attempt to process next item in queue asynchronously
     process.nextTick(processItemFromQueue);
   }
 }
